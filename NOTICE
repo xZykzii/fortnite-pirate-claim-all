@@ -1,0 +1,6 @@
+Fork de https://github.com/Napzeee/fortnite-pirate-token-claim-all-extension
+
+Copyright (c) 2026 Napzeee (código original, licencia MIT).
+
+Modificaciones de 2026 (canjes secuenciales, espera y reintentos ante HTTP 429,
+versión 1.1.0) por xZykzii, publicadas bajo la misma licencia MIT.
