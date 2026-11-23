@@ -12,6 +12,14 @@ Extensión de navegador que reclama en la tienda web de Fortnite todas las ofert
 | El modal se quedaba en «Hit a little snag» | Mientras espera muestra «Epic is asking us to slow down. Waiting Ns…» y continúa solo. |
 | Un fallo aislado marcaba el resto como fallido | Solo se marca la oferta afectada; el resto sigue su curso. |
 
+## Qué cambia en la 1.2.0
+
+| Problema | Corrección |
+| --- | --- |
+| Reclamaba «solo algunas cosas» y el resto no aparecía | La tienda se vuelve a leer hasta **4 pasadas**: Epic entrega listas parciales y los lotes regalan artículos, así que cada pasada busca ofertas gratuitas nuevas. |
+| La lectura del catálogo podía quedarse corta | El recorrido del árbol de ofertas llega más profundo (24 niveles) y acepta las dos formas del payload (`{ data }` o plano). |
+| No había forma de saber por qué faltaba algo | Botón **Copy report** en el resumen: copia ofertas detectadas, canjes, saldo, motivos de descarte y un desglose por tipo (skins, canciones, lotes…) de lo que seguía con precio. |
+
 El canje sigue enviando `expectedTotalPrice=0`, así que el servidor rechaza cualquier artículo que no sea realmente gratuito. El saldo de paVos se comprueba antes y después del lote y el proceso se detiene si baja.
 
 ## Instalación

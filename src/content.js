@@ -10,6 +10,7 @@
   const RATE_LIMIT_RETRIES = 8;
   const RATE_LIMIT_BASE_MS = 5000;
   const RATE_LIMIT_MAX_MS = 5 * 60 * 1000;
+  const MAX_PASSES = 4;
   const STOPPED = 'Stopped';
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const nativeFetch = window.fetch.bind(window);
@@ -98,7 +99,7 @@
     const offers = new Map();
     const seen = new Set();
     (function walk(o, depth) {
-      if (!o || depth > 16 || typeof o !== 'object' || seen.has(o)) return;
+      if (!o || depth > 24 || typeof o !== 'object' || seen.has(o)) return;
       seen.add(o);
       if (typeof o.offerId === 'string' && o.pricing) { if (!offers.has(o.offerId)) offers.set(o.offerId, o); return; }
       for (const k of Object.keys(o)) walk(o[k], depth + 1);
@@ -108,9 +109,13 @@
 
   async function loadShop() {
     const d = await getData('/item-shop.data?_routes=routes%2Fitem-shop._index');
-    const data = d?.['routes/item-shop._index']?.data;
-    if (!data) throw new Error("Couldn't read the Item Shop");
-    return { loggedIn: data.isLoggedIn !== false, offers: collectOffers(data) };
+    const node = d?.['routes/item-shop._index'];
+    // the route payload comes wrapped in { data } on some builds and plain on others
+    const data = node?.data ?? node;
+    if (!data || typeof data !== 'object') throw new Error("Couldn't read the Item Shop");
+    const offers = collectOffers(data);
+    if (!offers.length) throw new Error("Couldn't read the Item Shop");
+    return { loggedIn: data.isLoggedIn !== false, offers };
   }
 
   async function getCsrf() {
@@ -200,15 +205,10 @@
       const csrf = { value: await getCsrf() };
       const startBal = await getBalance();
 
-      const unowned = shop.offers.filter((o) => !owned(o));
-      const targets = unowned.filter(isFree);
-      const notCovered = unowned.filter((o) => !isFree(o));
-
-      if (!targets.length) { ui.done({ ...stats, notCovered, nothing: true, seconds: 0 }); state.remaining = 0; return; }
-      ui.build(targets);
-
       const count = () => ui.progress(stats.claimed + stats.viaBundle + stats.owned + stats.failed.length);
+      const attempted = new Set();
       const work = async (o) => {
+        attempted.add(o.offerId);
         ui.tile(o.offerId, 'working');
         const r = await claim(o, csrf);
         if (r.result === 'claimed') { stats.claimed++; stats.granted += r.granted; ui.toast(o); }
@@ -218,45 +218,69 @@
         count();
       };
 
-      const bundles = targets.filter(isBundle).sort((a, b) => (b.pricing.basePrice || 0) - (a.pricing.basePrice || 0));
-      let singles = targets.filter((o) => !isBundle(o));
-      if (bundles.length) {
-        ui.status(`Opening ${bundles.length} bundle${bundles.length > 1 ? 's' : ''}…`);
-        await each(bundles, work);
-      }
+      // the shop changes while we claim (bundles grant items) and Epic can answer with a
+      // partial list, so sweep again until a pass stops finding new free items
+      let notCovered = [];
+      let firstTargets = 0;
+      for (let pass = 0; !state.stopped && pass < MAX_PASSES; pass++) {
+        const shopNow = pass === 0 ? shop : await loadShop();
+        const unowned = shopNow.offers.filter((o) => !owned(o));
+        const targets = unowned.filter((o) => isFree(o) && !attempted.has(o.offerId));
 
-      if (!state.stopped && singles.length && !bundles.length) {
-        ui.status(`Grabbing ${plural(singles.length, 'item')}…`);
-        await each(singles, work);
-      } else if (!state.stopped && singles.length) {
-        ui.status('Checking what the bundles gave you…');
-        const shop2 = await loadShop();
-        const midBal = await getBalance();
-        if (startBal != null && midBal != null && midBal < startBal) {
-          throw new Error(`Safety stop: your V-Bucks went from ${startBal} to ${midBal}`);
+        if (pass === 0) {
+          notCovered = unowned.filter((o) => !isFree(o));
+          firstTargets = targets.length;
+          if (!targets.length) { ui.done({ ...stats, notCovered, nothing: true, seconds: 0 }); state.remaining = 0; return; }
+          ui.build(targets);
+        } else if (!targets.length) {
+          break;
+        } else {
+          ui.status(`Pass ${pass + 1}: ${plural(targets.length, 'more free item')} found…`);
         }
-        const fresh = new Map(shop2.offers.map((o) => [o.offerId, o]));
-        const left = [];
-        for (const o of singles) {
-          const f = fresh.get(o.offerId);
-          if (f && owned(f)) { stats.viaBundle++; ui.tile(o.offerId, 'bundle'); }
-          else if (f && !isFree(f)) { stats.failed.push({ title: o.title, why: 'no longer free' }); ui.tile(o.offerId, 'failed', 'no longer free'); }
-          else left.push(o);
+
+        const before = stats.claimed + stats.viaBundle + stats.owned;
+
+        const bundles = targets.filter(isBundle).sort((a, b) => (b.pricing.basePrice || 0) - (a.pricing.basePrice || 0));
+        const singles = targets.filter((o) => !isBundle(o));
+        if (bundles.length) {
+          ui.status(`Opening ${plural(bundles.length, 'bundle')}…`);
+          await each(bundles, work);
         }
-        count();
-        singles = left;
+
         if (singles.length && !state.stopped) {
-          ui.status(`Grabbing ${singles.length} more item${singles.length > 1 ? 's' : ''}…`);
-          await each(singles, work);
+          if (bundles.length) {
+            ui.status('Checking what the bundles gave you…');
+            const fresh = new Map((await loadShop()).offers.map((o) => [o.offerId, o]));
+            const left = [];
+            for (const o of singles) {
+              const f = fresh.get(o.offerId);
+              if (f && owned(f)) { stats.viaBundle++; ui.tile(o.offerId, 'bundle'); }
+              else if (f && !isFree(f)) { stats.failed.push({ title: o.title, why: 'no longer free' }); ui.tile(o.offerId, 'failed', 'no longer free'); }
+              else left.push(o);
+            }
+            count();
+            singles.length = 0;
+            singles.push(...left);
+          }
+          if (singles.length) {
+            ui.status(`Grabbing ${plural(singles.length, 'item')}…`);
+            await each(singles, work);
+          }
         }
+
+        if (state.stopped) break;
+        if (stats.claimed + stats.viaBundle + stats.owned === before) break;
       }
 
       const endBal = state.stopped ? null : await getBalance();
-      state.remaining = stats.failed.length + (targets.length - (stats.claimed + stats.viaBundle + stats.owned + stats.failed.length));
+      state.remaining = stats.failed.length;
       ui.done({
         ...stats, notCovered, stopped: state.stopped,
         seconds: (performance.now() - t0) / 1000,
         balance: { start: startBal, end: endBal },
+        detected: shop.offers.length,
+        firstTargets,
+        passes: MAX_PASSES,
       });
     } catch (e) {
       const msg = String(e?.message || e);
@@ -495,7 +519,7 @@
       },
       progress(done) {
         countTo($('.pt-n'), done);
-        $('.pt-bar i').style.width = `${total ? (done / total) * 100 : 0}%`;
+        $('.pt-bar i').style.width = `${total ? Math.min(100, (done / total) * 100) : 0}%`;
       },
       toast(o) {
         const row = $('.pt-toast-row');
@@ -520,6 +544,9 @@
             ? `Got ${plural(got, 'item')} before stopping.`
             : `${plural(s.granted + s.viaBundle, 'cosmetic')} added to your locker in ${secs}.`);
         }
+        if (s.detected) {
+          $('.pt-status').textContent += ` · ${plural(s.detected, 'offer')} detected, ${plural(s.firstTargets ?? 0, 'free item')} in the first pass.`;
+        }
         const bal = s.balance && s.balance.start != null && s.balance.end != null
           ? (s.balance.end < s.balance.start
             ? `<span class="pt-chip pt-chip-bad">${ICON.bang} V-Bucks changed: ${s.balance.start} → ${s.balance.end}</span>`
@@ -539,8 +566,39 @@
         const foot = $('.pt-m-foot');
         const again = s.stopped || s.failed.length;
         foot.innerHTML = `${again ? '<button type="button" class="pt-btn pt-again">Try again</button>' : ''}
+          <button type="button" class="pt-btn pt-copy">Copy report</button>
           <button type="button" class="pt-btn pt-primary pt-finish">Done</button>`;
         foot.querySelector('.pt-again')?.addEventListener('click', () => { closeModal(); run(); });
+        foot.querySelector('.pt-copy').onclick = async (e) => {
+          const byType = {};
+          for (const o of s.notCovered || []) {
+            const k = o.assetType || 'unknown';
+            byType[k] = byType[k] || { total: 0, shownFree: 0, paid: 0 };
+            byType[k].total++;
+            if ((o.pricing?.finalPrice ?? -1) === 0) byType[k].shownFree++;
+            else byType[k].paid++;
+          }
+          const report = {
+            detected: s.detected, firstPassFree: s.firstTargets, passes: s.passes,
+            claims: s.claimed, cameWithBundles: s.viaBundle + s.owned, balance: s.balance,
+            skipped: s.failed,
+            notCoveredByType: byType,
+            covered: (s.notCovered || []).slice(0, 80).map((o) => `${o.title} · ${o.assetType} · ${o.pricing?.currencyType} · ${o.pricing?.finalPrice}`),
+            coveredTotal: (s.notCovered || []).length,
+          };
+          try {
+            await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
+            e.target.textContent = 'Copied';
+          } catch (_) {
+            const ta = document.createElement('textarea');
+            ta.value = JSON.stringify(report, null, 2);
+            document.body.appendChild(ta);
+            ta.select();
+            const ok = document.execCommand?.('copy');
+            ta.remove();
+            e.target.textContent = ok ? 'Copied' : 'Copy failed';
+          }
+        };
         foot.querySelector('.pt-finish').onclick = () => location.reload();
         foot.querySelector('.pt-finish').focus({ preventScroll: true });
         if (!s.stopped && got > 0) confetti(root.querySelector('.pt-confetti'), $('.pt-m-logo'));
