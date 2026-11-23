@@ -20,6 +20,14 @@ Extensión de navegador que reclama en la tienda web de Fortnite todas las ofert
 | La lectura del catálogo podía quedarse corta | El recorrido del árbol de ofertas llega más profundo (24 niveles) y acepta las dos formas del payload (`{ data }` o plano). |
 | No había forma de saber por qué faltaba algo | Botón **Copy report** en el resumen: copia ofertas detectadas, canjes, saldo, motivos de descarte y un desglose por tipo (skins, canciones, lotes…) de lo que seguía con precio. |
 
+## Qué cambia en la 1.3.0
+
+| Problema | Corrección |
+| --- | --- |
+| Las canciones de «Pistas de improvisación» no se reclamaban | La tienda principal solo incluye **30 de las 130** canciones del día; el resto vive en `/item-shop/jam-tracks`, que la extensión ahora también lee y fusiona por `offerId`. |
+| Los botones no aparecían en la página de canciones | El disparador reconoce también `/item-shop/jam-tracks` y sus subrutas. |
+| Las canciones no tienen miniatura en el formato habitual | Se usa la portada del álbum (`media.albumArtUrl`) cuando el catálogo no trae imágenes cuadradas. |
+
 El canje sigue enviando `expectedTotalPrice=0`, así que el servidor rechaza cualquier artículo que no sea realmente gratuito. El saldo de paVos se comprueba antes y después del lote y el proceso se detiene si baja.
 
 ## Instalación

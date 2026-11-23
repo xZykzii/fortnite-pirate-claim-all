@@ -4,7 +4,7 @@
   if (window.__pirateTokenClaimAll) return;
   window.__pirateTokenClaimAll = true;
 
-  const SHOP_RE = /^\/item-shop\/?$/;
+  const SHOP_RE = /^\/item-shop(\/.*)?$/;
   // one request at a time: Epic answers 429 when claims are fired in parallel
   const REQUEST_GAP_MS = 1200;
   const RATE_LIMIT_RETRIES = 8;
@@ -107,15 +107,52 @@
     return [...offers.values()];
   }
 
+  function mergeOffers(...lists) {
+    const byId = new Map();
+    for (const list of lists) {
+      for (const o of list) if (o?.offerId && !byId.has(o.offerId)) byId.set(o.offerId, o);
+    }
+    return [...byId.values()];
+  }
+
+  // "Pistas de improvisación" tiene su propia ruta: la tienda principal solo trae
+  // una parte de las canciones, el resto vive aquí con el id dentro de forSale
+  function offersFromJamTracks(data) {
+    const list = data?.jamTracks;
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    for (const t of list) {
+      const s = t?.forSale;
+      if (!s || typeof s.offerId !== 'string' || !s.pricing) continue;
+      out.push({
+        ...t,
+        offerId: s.offerId,
+        pricing: s.pricing,
+        assetType: t.assetType || 'jamtrack',
+        title: t.title || t.artist || 'Jam Track',
+        image: t.media?.albumArtUrl || t.image || '',
+      });
+    }
+    return out;
+  }
+
+  async function loadJamTracks() {
+    try {
+      const d = await getData('/item-shop/jam-tracks.data?_routes=routes%2Fitem-shop.jam-tracks._index');
+      const node = d?.['routes/item-shop.jam-tracks._index'];
+      return offersFromJamTracks(node?.data ?? node);
+    } catch (_) { return []; }
+  }
+
   async function loadShop() {
-    const d = await getData('/item-shop.data?_routes=routes%2Fitem-shop._index');
-    const node = d?.['routes/item-shop._index'];
+    const main = await getData('/item-shop.data?_routes=routes%2Fitem-shop._index');
+    const node = main?.['routes/item-shop._index'];
     // the route payload comes wrapped in { data } on some builds and plain on others
     const data = node?.data ?? node;
     if (!data || typeof data !== 'object') throw new Error("Couldn't read the Item Shop");
     const offers = collectOffers(data);
     if (!offers.length) throw new Error("Couldn't read the Item Shop");
-    return { loggedIn: data.isLoggedIn !== false, offers };
+    return { loggedIn: data.isLoggedIn !== false, offers: mergeOffers(offers, await loadJamTracks()) };
   }
 
   async function getCsrf() {
@@ -141,7 +178,11 @@
     const vb = offers.filter((o) => o.pricing?.currencyType === 'MtxCurrency');
     return vb.length > 0 && vb.filter(isFree).length > vb.length / 2;
   };
-  const thumb = (o) => { const im = Array.isArray(o.image) ? o.image[0] : o.image; return im?.sm || im?.xs || im?.md || ''; };
+  const thumb = (o) => {
+    const im = Array.isArray(o.image) ? o.image[0] : o.image;
+    if (typeof im === 'string') return im;
+    return im?.sm || im?.xs || im?.md || '';
+  };
 
   async function claim(offer, csrf) {
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -311,8 +352,13 @@
 
   function pageShop() {
     try {
-      const d = window.__reactRouterDataRouter?.state?.loaderData?.['routes/item-shop._index'];
-      return d ? { loggedIn: d.isLoggedIn !== false, offers: collectOffers(d) } : null;
+      const ld = window.__reactRouterDataRouter?.state?.loaderData;
+      const main = ld?.['routes/item-shop._index'];
+      if (!main) return null;
+      const data = main?.data ?? main;
+      const jamNode = ld?.['routes/item-shop.jam-tracks._index'];
+      const offers = mergeOffers(collectOffers(data), offersFromJamTracks(jamNode?.data ?? jamNode));
+      return { loggedIn: data.isLoggedIn !== false, offers };
     } catch (_) { return null; }
   }
 
