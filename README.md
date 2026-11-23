@@ -1,76 +1,50 @@
-<p align="center">
-  <img src="src/logo320.webp" width="150" alt="Pirate Token Claim All logo">
-</p>
+# Pirate Token Claim All · fork con límite de peticiones
 
-<h1 align="center">Pirate Token Claim All</h1>
+Extensión de navegador que reclama en la tienda web de Fortnite todas las ofertas que ya aparecen a **0 paVos** mientras tu Pirate Shop Access está activo. Es un fork de [Napzeee/fortnite-pirate-token-claim-all-extension](https://github.com/Napzeee/fortnite-pirate-token-claim-all-extension) (MIT) centrado en un problema concreto: la versión 1.0.0 lanzaba varias peticiones a la vez y Epic respondía **HTTP 429**, abortando el lote con «Hit a little snag».
 
-<p align="center">
-  <b>A free, open-source Chrome and Edge extension for Fortnite</b><br>
-  Claim every free item in the Fortnite Item Shop in one click with the Pirate Shop Access token.
-</p>
+## Qué cambia respecto a la 1.0.0
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Chrome-Extension-4285F4?style=for-the-badge" alt="Chrome extension">
-  <img src="https://img.shields.io/badge/Edge-Extension-0078D7?style=for-the-badge" alt="Edge extension">
-  <img src="https://img.shields.io/badge/License-MIT-2EA44F?style=for-the-badge" alt="MIT license">
-</p>
+| Problema | Corrección |
+| --- | --- |
+| 4 canjes en paralelo | Los canjes son **estrictamente secuenciales**, con 1,2 s de separación y variación aleatoria. |
+| 3 peticiones de lectura a la vez al abrir | La tienda, el token CSRF y el saldo se piden **uno detrás de otro**. |
+| Un 429 cancelaba todo el lote | Cada petición espera y reintenta: usa `Retry-After` si Epic lo envía y, si no, retrocede 5 s, 10 s, 20 s… hasta 5 min, con un máximo de 8 reintentos. |
+| El modal se quedaba en «Hit a little snag» | Mientras espera muestra «Epic is asking us to slow down. Waiting Ns…» y continúa solo. |
+| Un fallo aislado marcaba el resto como fallido | Solo se marca la oferta afectada; el resto sigue su curso. |
 
-<p align="center">
-  <a href="https://github.com/Napzeee/fortnite-pirate-token-claim-all-extension/releases/latest/download/pirate-token-claim-all-extension.zip"><b>Download the extension</b></a> ·
-  <a href="#install-the-extension">Install</a> ·
-  <a href="#usage">Usage</a> ·
-  <a href="#faq">FAQ</a>
-</p>
+El canje sigue enviando `expectedTotalPrice=0`, así que el servidor rechaza cualquier artículo que no sea realmente gratuito. El saldo de paVos se comprueba antes y después del lote y el proceso se detiene si baja.
 
-The Pirate Shop Access token (also called the Pirate Token or Item Shop Token) makes everything sold for V-Bucks in the Fortnite Item Shop free for 14 days, but every item still has to be claimed one by one. This browser extension claims all of them for you in one click. A full shop usually takes 20 to 30 seconds.
+## Instalación
 
-https://github.com/user-attachments/assets/5c0667a6-c0e3-4b4a-bf65-8775d96fb979
+1. Descarga el repositorio (botón **Code → Download ZIP**) y descomprímelo.
+2. Abre `brave://extensions`, `chrome://extensions` o `edge://extensions`.
+3. Activa **Modo de desarrollador**.
+4. Pulsa **Cargar descomprimida** y selecciona la carpeta **`src`**, la que contiene `manifest.json`. No abras ningún archivo suelto.
+5. Recarga la pestaña de la tienda si ya la tenías abierta.
 
-## Features
-- One click claims every free skin, emote, pickaxe, bundle and jam track in the shop.
-- Bundles are claimed first, so items that come with a bundle are never claimed twice.
-- Only free items are claimed. V-Bucks are never spent.
-- Shows how many free items you still don't own, right next to the Buy V-Bucks button.
-- Tells you if you're signed out or the account doesn't have the token.
-- Light and dark mode.
+## Uso
 
-## Install the extension
-1. Download the extension: **[pirate-token-claim-all-extension.zip](https://github.com/Napzeee/fortnite-pirate-token-claim-all-extension/releases/latest/download/pirate-token-claim-all-extension.zip)**, then unzip it (right-click > Extract All).
-2. Open `chrome://extensions` (or `edge://extensions`) and turn on **Developer mode** in the top right corner.
-3. Click **Load unpacked** and select the unzipped folder.
+1. Activa el token dentro del juego (tienda → **Activate Now**).
+2. Entra en <https://www.fortnite.com/item-shop> con la misma cuenta.
+3. Pulsa **Claim all free**, junto al botón de comprar paVos, o **Claim everything** en el icono de la extensión.
 
-To update, unzip the new version over the old folder and click the reload button on the extension card.
+La extensión **no arranca sola** al abrir la tienda: solo empieza con una de esas dos pulsaciones. `Esc` o **Stop** detienen el proceso; lo ya reclamado se conserva y **Try again** retoma lo pendiente.
 
-## Usage
-1. Sign in at [fortnite.com/item-shop](https://www.fortnite.com/item-shop) with the account that has the token.
-2. Click **Claim all free** next to the Buy V-Bucks button, or click the extension's icon in your browser toolbar and choose **Claim everything**.
-3. When it finishes, click **Done**. The page reloads and every item shows as owned.
+## Cuándo aparece un 429
 
-Press **Esc** or **Stop** at any time to stop claiming.
+Epic limita por ráfagas de peticiones, no por número de artículos. Si aun así aparece:
 
-## Safety
-- Claims use the same request as Epic's own Confirm button, always with an expected price of 0. Epic's servers reject any claim for an item that isn't actually free.
-- Your V-Bucks balance is checked before and after every run.
-- Everything runs locally in your browser on fortnite.com. Nothing is sent anywhere else, and the extension never sees your password.
+- Deja la pestaña abierta: la extensión espera sola y muestra la cuenta atrás.
+- No recargues ni pulses varias veces: cada intento adicional alarga el bloqueo.
+- Si el bloqueo supera los 8 reintentos, espera unos minutos y pulsa **Try again**. Reintentar es seguro: los artículos que ya tienes se detectan como propios y no se vuelven a comprar.
 
-## FAQ
-**Is this a mod or a program I install on my PC?**
-No. It's a browser extension for Chrome and Edge. It only runs on fortnite.com in your browser and never touches the game or the files on your PC.
+## Límites conocidos
 
-**How do I claim everything in the Fortnite Item Shop at once?**
-Activate your Pirate Shop Access token in game, add this extension to Chrome or Edge and click Claim all free in the web Item Shop.
+- Es una herramienta **no oficial**. Los [términos de Epic Games](https://legal.epicgames.com/epicgames/tos) prohíben automatizar con bots el uso de sus productos; úsala bajo tu responsabilidad y solo con tu propia cuenta.
+- Solo funciona en escritorio con Chrome, Edge o Brave. Lo reclamado aparece en todas las plataformas.
+- No cubre packs de dinero real, regalos, pases de batalla ni más de un Sidekick, porque el propio token no los cubre.
+- No se ha probado canje real: no se activó ningún token ni se gastó nada durante el desarrollo.
 
-**Does it work on mobile or consoles?**
-The extension runs in desktop Chrome or Edge. Items claimed on fortnite.com show up on every platform you play on.
+## Créditos y licencia
 
-**What if my account doesn't have the token?**
-Nothing is claimed. The extension shows a message explaining that the account has no active token.
-
-## Source code
-The extension's source code is in [`src`](src). You can also load that folder directly with **Load unpacked**.
-
-## License
-The code is open source under the [MIT License](LICENSE). The Pirate token artwork belongs to Epic Games and isn't covered by this license.
-
----
-Not affiliated with or endorsed by Epic Games. Fortnite is a trademark of Epic Games, Inc.
+Código original de [Napzeee](https://github.com/Napzeee/fortnite-pirate-token-claim-all-extension), licencia MIT. Las modificaciones de este fork mantienen la misma licencia; consulta [LICENSE](LICENSE). El arte del token pertenece a Epic Games y no está cubierto por la licencia.

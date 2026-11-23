@@ -5,10 +5,59 @@
   window.__pirateTokenClaimAll = true;
 
   const SHOP_RE = /^\/item-shop\/?$/;
-  const CONCURRENCY = 4;
+  // one request at a time: Epic answers 429 when claims are fired in parallel
+  const REQUEST_GAP_MS = 1200;
+  const RATE_LIMIT_RETRIES = 8;
+  const RATE_LIMIT_BASE_MS = 5000;
+  const RATE_LIMIT_MAX_MS = 5 * 60 * 1000;
+  const STOPPED = 'Stopped';
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const nativeFetch = window.fetch.bind(window);
   const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // shared gate: minimum gap between requests plus a global pause after a 429
+  const gate = { nextAt: 0, blockedUntil: 0, onWait: null, onResume: null };
+
+  const jitter = (ms) => Math.round(ms * (0.85 + Math.random() * 0.3));
+
+  // Epic usually sends Retry-After in seconds; accept an HTTP date too
+  function retryAfterMs(r) {
+    const h = r.headers.get('retry-after');
+    if (!h) return 0;
+    const s = Number(h);
+    if (Number.isFinite(s)) return Math.max(0, s * 1000);
+    const t = Date.parse(h);
+    return Number.isFinite(t) ? Math.max(0, t - Date.now()) : 0;
+  }
+
+  async function waitForGate() {
+    for (;;) {
+      if (state.stopped) throw new Error(STOPPED);
+      const left = Math.max(gate.nextAt, gate.blockedUntil) - Date.now();
+      if (left <= 0) return;
+      gate.onWait?.(Math.ceil(left / 1000));
+      await sleep(Math.min(1000, left));
+    }
+  }
+
+  async function epicFetch(url, init) {
+    for (let attempt = 0; ; attempt++) {
+      await waitForGate();
+      const r = await nativeFetch(url, init);
+      if (r.status !== 429 && r.status !== 503) {
+        gate.blockedUntil = 0;
+        gate.nextAt = Date.now() + jitter(REQUEST_GAP_MS);
+        gate.onResume?.();
+        return r;
+      }
+      if (attempt >= RATE_LIMIT_RETRIES) {
+        throw new Error(`Epic keeps answering HTTP ${r.status}. Wait a few minutes and press Try again`);
+      }
+      const backoff = Math.min(RATE_LIMIT_MAX_MS, RATE_LIMIT_BASE_MS * 2 ** attempt);
+      gate.blockedUntil = Date.now() + jitter(Math.max(retryAfterMs(r), backoff));
+      gate.nextAt = gate.blockedUntil;
+    }
+  }
 
   function decodeTS(text) {  // epic's .data responses come in this format
     const arr = JSON.parse(text);
@@ -40,7 +89,7 @@
   }
 
   async function getData(url) {
-    const r = await nativeFetch(url, { credentials: 'include' });
+    const r = await epicFetch(url, { credentials: 'include' });
     if (!r.ok) throw new Error(`Epic's site answered with an error (HTTP ${r.status})`);
     return decodeTS(await r.text());
   }
@@ -90,16 +139,21 @@
   const thumb = (o) => { const im = Array.isArray(o.image) ? o.image[0] : o.image; return im?.sm || im?.xs || im?.md || ''; };
 
   async function claim(offer, csrf) {
-    for (let attempt = 0; attempt < 4; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       let r, d = null;
       try {
-        r = await nativeFetch('/item-shop/purchase.data', {
+        r = await epicFetch('/item-shop/purchase.data', {
           method: 'POST',
           credentials: 'include',
           body: new URLSearchParams({ csrfToken: csrf.value, offerId: offer.offerId, expectedTotalPrice: '0' }),
         });
         d = decodeTS(await r.text())?.data;
-      } catch (e) { d = { success: false, error: String(e) }; }
+      } catch (e) {
+        const why = String(e?.message || e);
+        if (why === STOPPED) return { result: 'stopped' };
+        if (/429|limit/i.test(why)) return { result: 'failed', why };
+        d = { success: false, error: why };
+      }
       if (d?.success) {
         const items = (d.data?.notifications || []).flatMap((n) => n.lootResult?.items || []);
         return { result: 'claimed', granted: items.length };
@@ -107,19 +161,22 @@
       const err = String(d?.error || `HTTP ${r?.status}`).replace(/^HttpError:\s*/, '');
       if (/already own/i.test(err)) return { result: 'owned' };
       if (/csrf/i.test(err) && attempt === 0) { csrf.value = await getCsrf(); continue; }
-      if (/throttl|too many|rate limit|timeout|temporar/i.test(err) || r?.status === 429 || r?.status >= 500) {
-        await sleep(1200 * (attempt + 1)); continue;
+      // the request layer already retried 429/503; this covers soft errors in the body
+      if (/throttl|too many|rate limit|timeout|temporar/i.test(err)) {
+        await sleep(jitter(RATE_LIMIT_BASE_MS * (attempt + 1)));
+        continue;
       }
       return { result: 'failed', why: err.slice(0, 140) };
     }
     return { result: 'failed', why: 'Epic asked us to slow down. Try again in a minute' };
   }
 
-  async function pool(items, worker) {
-    let i = 0;
-    await Promise.all(Array.from({ length: CONCURRENCY }, async () => {
-      while (i < items.length && !state.stopped) await worker(items[i++]);
-    }));
+  // claims are strictly sequential so a burst never trips the limiter
+  async function each(items, worker) {
+    for (const item of items) {
+      if (state.stopped) return;
+      await worker(item);
+    }
   }
 
   const state = { running: false, stopped: false, remaining: null };
@@ -131,13 +188,17 @@
     const ui = openModal();
     const t0 = performance.now();
     const stats = { claimed: 0, viaBundle: 0, owned: 0, failed: [], granted: 0 };
+    let waiting = false;
+    gate.onWait = (s) => { waiting = true; ui.status(`Epic is asking us to slow down. Waiting ${s}s…`); };
+    gate.onResume = () => { if (waiting) { waiting = false; ui.status('Claiming…'); } };
     try {
       ui.status('Reading the shop…');
-      const [shop, csrf0, startBal] = await Promise.all([loadShop(), getCsrf().catch((e) => e), getBalance()]);
+      // sequential on purpose: three parallel reads are enough to get a 429
+      const shop = await loadShop();
       if (!shop.loggedIn) { ui.notice('signin'); return; }
       if (!hasToken(shop.offers)) { ui.notice('notoken'); return; }
-      if (csrf0 instanceof Error) throw csrf0;
-      const csrf = { value: csrf0 };
+      const csrf = { value: await getCsrf() };
+      const startBal = await getBalance();
 
       const unowned = shop.offers.filter((o) => !owned(o));
       const targets = unowned.filter(isFree);
@@ -152,7 +213,7 @@
         const r = await claim(o, csrf);
         if (r.result === 'claimed') { stats.claimed++; stats.granted += r.granted; ui.toast(o); }
         else if (r.result === 'owned') stats.owned++;
-        else stats.failed.push({ title: o.title, why: r.why });
+        else if (r.result !== 'stopped') stats.failed.push({ title: o.title, why: r.why });
         ui.tile(o.offerId, r.result, r.why);
         count();
       };
@@ -161,15 +222,16 @@
       let singles = targets.filter((o) => !isBundle(o));
       if (bundles.length) {
         ui.status(`Opening ${bundles.length} bundle${bundles.length > 1 ? 's' : ''}…`);
-        await pool(bundles, work);
+        await each(bundles, work);
       }
 
       if (!state.stopped && singles.length && !bundles.length) {
         ui.status(`Grabbing ${plural(singles.length, 'item')}…`);
-        await pool(singles, work);
+        await each(singles, work);
       } else if (!state.stopped && singles.length) {
         ui.status('Checking what the bundles gave you…');
-        const [shop2, midBal] = await Promise.all([loadShop(), getBalance()]);
+        const shop2 = await loadShop();
+        const midBal = await getBalance();
         if (startBal != null && midBal != null && midBal < startBal) {
           throw new Error(`Safety stop: your V-Bucks went from ${startBal} to ${midBal}`);
         }
@@ -185,11 +247,11 @@
         singles = left;
         if (singles.length && !state.stopped) {
           ui.status(`Grabbing ${singles.length} more item${singles.length > 1 ? 's' : ''}…`);
-          await pool(singles, work);
+          await each(singles, work);
         }
       }
 
-      const endBal = await getBalance();
+      const endBal = state.stopped ? null : await getBalance();
       state.remaining = stats.failed.length + (targets.length - (stats.claimed + stats.viaBundle + stats.owned + stats.failed.length));
       ui.done({
         ...stats, notCovered, stopped: state.stopped,
@@ -197,9 +259,15 @@
         balance: { start: startBal, end: endBal },
       });
     } catch (e) {
-      ui.error(String(e.message || e));
+      const msg = String(e?.message || e);
+      if (msg === STOPPED) closeModal();
+      else ui.error(msg);
     } finally {
+      gate.onWait = null;
+      gate.onResume = null;
+      gate.blockedUntil = 0;
       state.running = false;
+      state.stopped = false;
       liveShop = null;
       syncHero();
       refreshLive();
